@@ -1,5 +1,7 @@
 from abc import abstractmethod
+from pathlib import Path
 
+import pandas as pd
 import torch
 import torch.nn as nn
 from numpy import inf
@@ -7,6 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm.auto import tqdm
 
 from src.datasets.data_utils import inf_loop
+from src.logger.utils import plot_spectrogram
 from src.metrics.tracker import MetricTracker
 from src.utils.io_utils import ROOT_PATH
 
@@ -147,9 +150,10 @@ class BaseTrainer:
             ROOT_PATH / config.trainer.save_dir / config.writer.run_name
         )
 
-        # if config.trainer.get("resume_from") is not None:
-        #     resume_path = self.checkpoint_dir / config.trainer.resume_from
-        #     self._resume_checkpoint(resume_path)
+        if config.trainer.get("resume_from") is not None:
+            resume_path = self.checkpoint_dir / config.trainer.resume_from
+            self._resume_checkpoint(resume_path, "generator")
+            self._resume_checkpoint(resume_path, "discriminator")
         #
         # if config.trainer.get("from_pretrained") is not None:
         #     self._from_pretrained(config.trainer.get("from_pretrained"))
@@ -180,6 +184,35 @@ class BaseTrainer:
             )
             raise e
 
+    def _log_audio(self, batch: dict[str, torch.Tensor], mode: str) -> None:
+        real_audio = batch["real_audio"][0]
+        generated_audio = batch["fake_audio"][0]
+
+        self.writer.add_table(
+            f"audio_{mode}",
+            pd.DataFrame.from_dict(
+                {
+                    batch["name"][0]: {
+                        "real_audio": self.writer.wandb.Audio(
+                            real_audio.squeeze(0).cpu().numpy(), sample_rate=22050
+                        ),
+                        "generated_audio": self.writer.wandb.Audio(
+                            generated_audio.squeeze(0).cpu().numpy(), sample_rate=22050
+                        ),
+                    }
+                },
+                orient="index",
+            ),
+        )
+        self.writer.add_image(
+            "real_spectrogram",
+            plot_spectrogram(batch["real_spectrogram"][0].squeeze(0).cpu().numpy()),
+        )
+        self.writer.add_image(
+            "generated_spectrogram",
+            plot_spectrogram(batch["fake_spectrogram"][0].squeeze(0).cpu().numpy()),
+        )
+
     def _train_process(self):
         """
         Full training logic:
@@ -208,7 +241,22 @@ class BaseTrainer:
             )
 
             if epoch % self.save_period == 0 or best:
-                self._save_checkpoint(epoch, save_best=best, only_best=True)
+                self._save_checkpoint(
+                    "generator",
+                    model=self.generator,
+                    optimizer=self.generator_optimizer,
+                    lr_scheduler=self.generator_lr_scheduler,
+                    epoch=self._last_epoch,
+                    save_best=False,
+                )
+                self._save_checkpoint(
+                    "discriminator",
+                    model=self.discriminator,
+                    optimizer=self.discriminator_optimizer,
+                    lr_scheduler=self.discriminator_lr_scheduler,
+                    epoch=self._last_epoch,
+                    save_best=False,
+                )
 
             if stop_process:  # early_stop
                 break
@@ -238,6 +286,8 @@ class BaseTrainer:
                     batch,
                     metrics=self.train_metrics,
                 )
+                if batch_idx % 5 == 0:
+                    self._log_audio(batch, "train")
             except torch.cuda.OutOfMemoryError as e:
                 if self.skip_oom:
                     self.logger.warning("OOM on batch. Skipping batch.")
@@ -323,6 +373,8 @@ class BaseTrainer:
                     batch,
                     metrics=self.evaluation_metrics,
                 )
+                if batch_idx % 5 == 0:
+                    self._log_audio(batch, "test")
             self.writer.set_step(epoch * self.epoch_len, part)
             self._log_scalars(self.evaluation_metrics)
             self._log_batch(
@@ -552,51 +604,56 @@ class BaseTrainer:
                 self.writer.add_checkpoint(best_path, str(self.checkpoint_dir.parent))
             self.logger.info("Saving current best: model_best.pth ...")
 
-    # def _resume_checkpoint(self, resume_path):
-    #     """
-    #     Resume from a saved checkpoint (in case of server crash, etc.).
-    #     The function loads state dicts for everything, including model,
-    #     optimizers, etc.
-    #
-    #     Notice that the checkpoint should be located in the current experiment
-    #     saved directory (where all checkpoints are saved in '_save_checkpoint').
-    #
-    #     Args:
-    #         resume_path (str): Path to the checkpoint to be resumed.
-    #     """
-    #     resume_path = str(resume_path)
-    #     self.logger.info(f"Loading checkpoint: {resume_path} ...")
-    #     checkpoint = torch.load(resume_path, self.device)
-    #     self.start_epoch = checkpoint["epoch"] + 1
-    #     self.mnt_best = checkpoint["monitor_best"]
-    #
-    #     # load architecture params from checkpoint.
-    #     if checkpoint["config"]["model"] != self.config["model"]:
-    #         self.logger.warning(
-    #             "Warning: Architecture configuration given in the config file is different from that "
-    #             "of the checkpoint. This may yield an exception when state_dict is loaded."
-    #         )
-    #     self.model.load_state_dict(checkpoint["state_dict"])
-    #
-    #     # load optimizer state from checkpoint only when optimizer type is not changed.
-    #     if (
-    #             checkpoint["config"]["optimizer"] != self.config["optimizer"]
-    #             or checkpoint["config"]["lr_scheduler"] != self.config[
-    #         "lr_scheduler"]
-    #     ):
-    #         self.logger.warning(
-    #             "Warning: Optimizer or lr_scheduler given in the config file is different "
-    #             "from that of the checkpoint. Optimizer and scheduler parameters "
-    #             "are not resumed."
-    #         )
-    #     else:
-    #         self.optimizer.load_state_dict(checkpoint["optimizer"])
-    #         self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-    #
-    #     self.logger.info(
-    #         f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
-    #     )
-    #
+    def _resume_checkpoint(self, resume_path: Path, model_type: str):
+        """
+        Resume from a saved checkpoint (in case of server crash, etc.).
+        The function loads state dicts for everything, including model,
+        optimizers, etc.
+
+        Notice that the checkpoint should be located in the current experiment
+        saved directory (where all checkpoints are saved in '_save_checkpoint').
+
+        Args:
+            resume_path (str): Path to the checkpoint to be resumed.
+        """
+        resume_path = resume_path.parent / f"{model_type}-{resume_path.name}"
+        self.logger.info(f"Loading checkpoint: {resume_path} ...")
+        checkpoint = torch.load(resume_path, self.device)
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.mnt_best = checkpoint["monitor_best"]
+
+        # load architecture params from checkpoint.
+        if checkpoint["config"][model_type] != self.config[model_type]:
+            self.logger.warning(
+                "Warning: Architecture configuration given in the config file is different from that "
+                "of the checkpoint. This may yield an exception when state_dict is loaded."
+            )
+        getattr(self, model_type).load_state_dict(checkpoint["state_dict"])
+
+        # load optimizer state from checkpoint only when optimizer type is not changed.
+        if (
+            checkpoint["config"][f"{model_type}_optimizer"]
+            != self.config[f"{model_type}_optimizer"]
+            or checkpoint["config"][f"{model_type}_lr_scheduler"]
+            != self.config[f"{model_type}_lr_scheduler"]
+        ):
+            self.logger.warning(
+                "Warning: Optimizer or lr_scheduler given in the config file is different "
+                "from that of the checkpoint. Optimizer and scheduler parameters "
+                "are not resumed."
+            )
+        else:
+            getattr(self, f"{model_type}_optimizer").load_state_dict(
+                checkpoint["optimizer"]
+            )
+            getattr(self, f"{model_type}_lr_scheduler").load_state_dict(
+                checkpoint["lr_scheduler"]
+            )
+
+        self.logger.info(
+            f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
+        )
+
     # def _from_pretrained(self, pretrained_path):
     #     """
     #     Init model with weights from pretrained pth file.

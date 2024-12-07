@@ -93,6 +93,10 @@ class Trainer(BaseTrainer):
 
         batch["generator_loss"] = generator_loss.item()
         batch["discriminator_loss"] = discriminator_loss.item()
+        batch["real_audio"] = real_audio.detach()
+        batch["fake_audio"] = fake_audio.detach()
+        batch["real_spectrogram"] = real_spectrogram.detach()
+        batch["fake_spectrogram"] = fake_spectrogram.detach()
 
         # update metrics for each loss (in case of multiple losses)
         metrics.update("generator_loss", generator_loss.item())
