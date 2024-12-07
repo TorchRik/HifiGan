@@ -185,22 +185,23 @@ class BaseTrainer:
             raise e
 
     def _log_audio(self, batch: dict[str, torch.Tensor], mode: str) -> None:
-        real_audio = batch["real_audio"][0]
-        generated_audio = batch["fake_audio"][0]
+        table = {}
+        for i in range(min(8, batch["audio"].shape[0])):
+            real_audio = batch["real_audio"][i]
+            generated_audio = batch["fake_audio"][i]
+            table[batch["name"][i]] = {
+                "real_audio": self.writer.wandb.Audio(
+                    real_audio.squeeze(0).cpu().numpy(), sample_rate=22050
+                ),
+                "generated_audio": self.writer.wandb.Audio(
+                    generated_audio.squeeze(0).cpu().numpy(), sample_rate=22050
+                ),
+            }
 
         self.writer.add_table(
             f"audio_{mode}",
             pd.DataFrame.from_dict(
-                {
-                    batch["name"][0]: {
-                        "real_audio": self.writer.wandb.Audio(
-                            real_audio.squeeze(0).cpu().numpy(), sample_rate=22050
-                        ),
-                        "generated_audio": self.writer.wandb.Audio(
-                            generated_audio.squeeze(0).cpu().numpy(), sample_rate=22050
-                        ),
-                    }
-                },
+                table,
                 orient="index",
             ),
         )
