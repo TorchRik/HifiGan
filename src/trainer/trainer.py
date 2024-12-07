@@ -1,4 +1,8 @@
+import torch
+import torch.nn.functional as F
+
 from src.metrics.tracker import MetricTracker
+from src.model import MelSpectrogramConfig
 from src.trainer.base_trainer import BaseTrainer
 
 
@@ -30,26 +34,69 @@ class Trainer(BaseTrainer):
         batch = self.transform_batch(batch)  # transform batch on device -- faster
 
         metric_funcs = self.metrics["inference"]
+
+        real_spectrogram = self.audio_to_mel(batch["audio"])
+        fake_audio = self.generator(x=batch["spectrogram"])
+        fake_spectrogram = self.audio_to_mel(fake_audio)
+
+        real_spectrogram = F.pad(
+            real_spectrogram,
+            (
+                0,
+                fake_spectrogram.shape[-1] - real_spectrogram.shape[-1],
+            ),
+            value=MelSpectrogramConfig.pad_value,
+        )
+
+        real_audio = F.pad(
+            batch["audio"],
+            (
+                0,
+                fake_audio.shape[-1] - batch["audio"].shape[-1],
+            ),
+            value=MelSpectrogramConfig.pad_value,
+        )
+
+        # discriminator loss:
         if self.is_train:
             metric_funcs = self.metrics["train"]
-            self.optimizer.zero_grad()
+            self.discriminator_optimizer.zero_grad()
 
-        outputs = self.model(**batch)
-        batch.update(outputs)
+        prediction_for_real = self.discriminator(real_audio)
+        prediction_for_fake = self.discriminator(fake_audio.detach())
 
-        all_losses = self.criterion(**batch)
-        batch.update(all_losses)
+        discriminator_loss = self.discriminator_loss(
+            prediction_for_real=prediction_for_real,
+            prediction_for_fake=prediction_for_fake,
+        )
 
         if self.is_train:
-            batch["loss"].backward()  # sum of all losses is always called loss
+            discriminator_loss.backward()
             self._clip_grad_norm()
-            self.optimizer.step()
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
+            self.discriminator_optimizer.step()
+
+            self.generator_optimizer.zero_grad()
+
+        disc_output_for_real = self.discriminator.forward_with_features_map(real_audio)
+        disc_output_for_fake = self.discriminator.forward_with_features_map(fake_audio)
+
+        generator_loss = self.generator_loss(
+            generated_mel=fake_spectrogram,
+            target_mel=real_spectrogram,
+            disc_output_for_real=disc_output_for_real,
+            disc_output_for_fake=disc_output_for_fake,
+        )
+        if self.is_train:
+            generator_loss.backward()
+            self._clip_grad_norm()
+            self.generator_optimizer.step()
+
+        batch["generator_loss"] = generator_loss.item()
+        batch["discriminator_loss"] = discriminator_loss.item()
 
         # update metrics for each loss (in case of multiple losses)
-        for loss_name in self.config.writer.loss_names:
-            metrics.update(loss_name, batch[loss_name].item())
+        metrics.update("generator_loss", generator_loss.item())
+        metrics.update("discriminator_loss", discriminator_loss.item())
 
         for met in metric_funcs:
             metrics.update(met.name, met(**batch))

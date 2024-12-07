@@ -1,6 +1,7 @@
 from abc import abstractmethod
 
 import torch
+import torch.nn as nn
 from numpy import inf
 from torch.nn.utils import clip_grad_norm_
 from tqdm.auto import tqdm
@@ -17,11 +18,16 @@ class BaseTrainer:
 
     def __init__(
         self,
-        model,
-        criterion,
-        metrics,
-        optimizer,
-        lr_scheduler,
+        generator: nn.Module,
+        discriminator: nn.Module,
+        audio_to_mel: nn.Module,
+        generator_loss: nn.Module,
+        discriminator_loss: nn.Module,
+        metrics: nn.Module,
+        generator_optimizer,
+        discriminator_optimizer,
+        generator_lr_scheduler,
+        discriminator_lr_scheduler,
         config,
         device,
         dataloaders,
@@ -66,10 +72,16 @@ class BaseTrainer:
         self.logger = logger
         self.log_step = config.trainer.get("log_step", 50)
 
-        self.model = model
-        self.criterion = criterion
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
+        self.generator = generator
+        self.discriminator = discriminator
+        self.audio_to_mel = audio_to_mel
+        self.generator_loss = generator_loss
+        self.discriminator_loss = discriminator_loss
+
+        self.generator_optimizer = generator_optimizer
+        self.discriminator_optimizer = discriminator_optimizer
+        self.generator_lr_scheduler = generator_lr_scheduler
+        self.discriminator_lr_scheduler = discriminator_lr_scheduler
         self.batch_transforms = batch_transforms
 
         # define dataloaders
@@ -135,12 +147,12 @@ class BaseTrainer:
             ROOT_PATH / config.trainer.save_dir / config.writer.run_name
         )
 
-        if config.trainer.get("resume_from") is not None:
-            resume_path = self.checkpoint_dir / config.trainer.resume_from
-            self._resume_checkpoint(resume_path)
-
-        if config.trainer.get("from_pretrained") is not None:
-            self._from_pretrained(config.trainer.get("from_pretrained"))
+        # if config.trainer.get("resume_from") is not None:
+        #     resume_path = self.checkpoint_dir / config.trainer.resume_from
+        #     self._resume_checkpoint(resume_path)
+        #
+        # if config.trainer.get("from_pretrained") is not None:
+        #     self._from_pretrained(config.trainer.get("from_pretrained"))
 
     def train(self):
         """
@@ -150,7 +162,22 @@ class BaseTrainer:
             self._train_process()
         except KeyboardInterrupt as e:
             self.logger.info("Saving model on keyboard interrupt")
-            self._save_checkpoint(self._last_epoch, save_best=False)
+            self._save_checkpoint(
+                "generator",
+                model=self.generator,
+                optimizer=self.generator_optimizer,
+                lr_scheduler=self.generator_lr_scheduler,
+                epoch=self._last_epoch,
+                save_best=False,
+            )
+            self._save_checkpoint(
+                "discriminator",
+                model=self.discriminator,
+                optimizer=self.discriminator_optimizer,
+                lr_scheduler=self.discriminator_lr_scheduler,
+                epoch=self._last_epoch,
+                save_best=False,
+            )
             raise e
 
     def _train_process(self):
@@ -198,7 +225,8 @@ class BaseTrainer:
                 this epoch.
         """
         self.is_train = True
-        self.model.train()
+        self.generator.train()
+        self.discriminator.train()
         self.train_metrics.reset()
         self.writer.set_step((epoch - 1) * self.epoch_len)
         self.writer.add_scalar("epoch", epoch)
@@ -218,18 +246,33 @@ class BaseTrainer:
                 else:
                     raise e
 
-            self.train_metrics.update("grad_norm", self._get_grad_norm())
+            self.train_metrics.update(
+                "generator_grad_norm", self._get_grad_norm(self.generator)
+            )
+            self.train_metrics.update(
+                "discriminator_grad_norm", self._get_grad_norm(self.discriminator)
+            )
 
             # log current results
             if batch_idx % self.log_step == 0:
                 self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx)
                 self.logger.debug(
-                    "Train Epoch: {} {} Loss: {:.6f}".format(
-                        epoch, self._progress(batch_idx), batch["loss"].item()
+                    "Train Epoch: {} {} Generator Loss: {:.6f}".format(
+                        epoch, self._progress(batch_idx), batch["generator_loss"]
+                    )
+                )
+                self.logger.debug(
+                    "Train Epoch: {} {} Discriminator Loss: {:.6f}".format(
+                        epoch, self._progress(batch_idx), batch["discriminator_loss"]
                     )
                 )
                 self.writer.add_scalar(
-                    "learning rate", self.lr_scheduler.get_last_lr()[0]
+                    "generator learning rate",
+                    self.generator_lr_scheduler.get_last_lr()[0],
+                )
+                self.writer.add_scalar(
+                    "discriminator learning rate",
+                    self.discriminator_lr_scheduler.get_last_lr()[0],
                 )
                 self._log_scalars(self.train_metrics)
                 self._log_batch(batch_idx, batch)
@@ -247,6 +290,12 @@ class BaseTrainer:
             val_logs = self._evaluation_epoch(epoch, part, dataloader)
             logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
 
+        if self.generator_lr_scheduler is not None:
+            self.generator_lr_scheduler.step()
+
+        if self.discriminator_lr_scheduler is not None:
+            self.discriminator_lr_scheduler.step()
+
         return logs
 
     def _evaluation_epoch(self, epoch, part, dataloader):
@@ -261,7 +310,8 @@ class BaseTrainer:
             logs (dict): logs that contain the information about evaluation.
         """
         self.is_train = False
-        self.model.eval()
+        self.generator.eval()
+        self.discriminator.eval()
         self.evaluation_metrics.reset()
         with torch.no_grad():
             for batch_idx, batch in tqdm(
@@ -378,13 +428,19 @@ class BaseTrainer:
         Clips the gradient norm by the value defined in
         config.trainer.max_grad_norm
         """
-        if self.config["trainer"].get("max_grad_norm", None) is not None:
+        if self.config["trainer"].get("generator_max_grad_norm", None) is not None:
             clip_grad_norm_(
-                self.model.parameters(), self.config["trainer"]["max_grad_norm"]
+                self.generator.parameters(),
+                self.config["trainer"]["generator_max_grad_norm"],
+            )
+        if self.config["trainer"].get("discriminator_max_grad_norm", None) is not None:
+            clip_grad_norm_(
+                self.discriminator.parameters(),
+                self.config["trainer"]["discriminator_max_grad_norm"],
             )
 
     @torch.no_grad()
-    def _get_grad_norm(self, norm_type=2):
+    def _get_grad_norm(self, model: nn.Module, norm_type=2):
         """
         Calculates the gradient norm for logging.
 
@@ -393,7 +449,7 @@ class BaseTrainer:
         Returns:
             total_norm (float): the calculated norm.
         """
-        parameters = self.model.parameters()
+        parameters = model.parameters()
         if isinstance(parameters, torch.Tensor):
             parameters = [parameters]
         parameters = [p for p in parameters if p.grad is not None]
@@ -451,7 +507,16 @@ class BaseTrainer:
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(f"{metric_name}", metric_tracker.avg(metric_name))
 
-    def _save_checkpoint(self, epoch, save_best=False, only_best=False):
+    def _save_checkpoint(
+        self,
+        model_type_suffix: str,
+        model: nn.Module,
+        optimizer: nn.Module,
+        lr_scheduler,
+        epoch: int,
+        save_best=False,
+        only_best=False,
+    ):
         """
         Save the checkpoints.
 
@@ -462,17 +527,19 @@ class BaseTrainer:
                 'model_best.pth'(do not duplicate the checkpoint as
                 checkpoint-epochEpochNumber.pth)
         """
-        arch = type(self.model).__name__
+        arch = type(model).__name__
         state = {
             "arch": arch,
             "epoch": epoch,
-            "state_dict": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "lr_scheduler": self.lr_scheduler.state_dict(),
+            "state_dict": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "lr_scheduler": lr_scheduler.state_dict(),
             "monitor_best": self.mnt_best,
             "config": self.config,
         }
-        filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}.pth")
+        filename = str(
+            self.checkpoint_dir / f"{model_type_suffix}-checkpoint-epoch{epoch}.pth"
+        )
         if not (only_best and save_best):
             torch.save(state, filename)
             if self.config.writer.log_checkpoints:
@@ -485,69 +552,72 @@ class BaseTrainer:
                 self.writer.add_checkpoint(best_path, str(self.checkpoint_dir.parent))
             self.logger.info("Saving current best: model_best.pth ...")
 
-    def _resume_checkpoint(self, resume_path):
-        """
-        Resume from a saved checkpoint (in case of server crash, etc.).
-        The function loads state dicts for everything, including model,
-        optimizers, etc.
-
-        Notice that the checkpoint should be located in the current experiment
-        saved directory (where all checkpoints are saved in '_save_checkpoint').
-
-        Args:
-            resume_path (str): Path to the checkpoint to be resumed.
-        """
-        resume_path = str(resume_path)
-        self.logger.info(f"Loading checkpoint: {resume_path} ...")
-        checkpoint = torch.load(resume_path, self.device)
-        self.start_epoch = checkpoint["epoch"] + 1
-        self.mnt_best = checkpoint["monitor_best"]
-
-        # load architecture params from checkpoint.
-        if checkpoint["config"]["model"] != self.config["model"]:
-            self.logger.warning(
-                "Warning: Architecture configuration given in the config file is different from that "
-                "of the checkpoint. This may yield an exception when state_dict is loaded."
-            )
-        self.model.load_state_dict(checkpoint["state_dict"])
-
-        # load optimizer state from checkpoint only when optimizer type is not changed.
-        if (
-            checkpoint["config"]["optimizer"] != self.config["optimizer"]
-            or checkpoint["config"]["lr_scheduler"] != self.config["lr_scheduler"]
-        ):
-            self.logger.warning(
-                "Warning: Optimizer or lr_scheduler given in the config file is different "
-                "from that of the checkpoint. Optimizer and scheduler parameters "
-                "are not resumed."
-            )
-        else:
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
-            self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-
-        self.logger.info(
-            f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
-        )
-
-    def _from_pretrained(self, pretrained_path):
-        """
-        Init model with weights from pretrained pth file.
-
-        Notice that 'pretrained_path' can be any path on the disk. It is not
-        necessary to locate it in the experiment saved dir. The function
-        initializes only the model.
-
-        Args:
-            pretrained_path (str): path to the model state dict.
-        """
-        pretrained_path = str(pretrained_path)
-        if hasattr(self, "logger"):  # to support both trainer and inferencer
-            self.logger.info(f"Loading model weights from: {pretrained_path} ...")
-        else:
-            print(f"Loading model weights from: {pretrained_path} ...")
-        checkpoint = torch.load(pretrained_path, self.device)
-
-        if checkpoint.get("state_dict") is not None:
-            self.model.load_state_dict(checkpoint["state_dict"])
-        else:
-            self.model.load_state_dict(checkpoint)
+    # def _resume_checkpoint(self, resume_path):
+    #     """
+    #     Resume from a saved checkpoint (in case of server crash, etc.).
+    #     The function loads state dicts for everything, including model,
+    #     optimizers, etc.
+    #
+    #     Notice that the checkpoint should be located in the current experiment
+    #     saved directory (where all checkpoints are saved in '_save_checkpoint').
+    #
+    #     Args:
+    #         resume_path (str): Path to the checkpoint to be resumed.
+    #     """
+    #     resume_path = str(resume_path)
+    #     self.logger.info(f"Loading checkpoint: {resume_path} ...")
+    #     checkpoint = torch.load(resume_path, self.device)
+    #     self.start_epoch = checkpoint["epoch"] + 1
+    #     self.mnt_best = checkpoint["monitor_best"]
+    #
+    #     # load architecture params from checkpoint.
+    #     if checkpoint["config"]["model"] != self.config["model"]:
+    #         self.logger.warning(
+    #             "Warning: Architecture configuration given in the config file is different from that "
+    #             "of the checkpoint. This may yield an exception when state_dict is loaded."
+    #         )
+    #     self.model.load_state_dict(checkpoint["state_dict"])
+    #
+    #     # load optimizer state from checkpoint only when optimizer type is not changed.
+    #     if (
+    #             checkpoint["config"]["optimizer"] != self.config["optimizer"]
+    #             or checkpoint["config"]["lr_scheduler"] != self.config[
+    #         "lr_scheduler"]
+    #     ):
+    #         self.logger.warning(
+    #             "Warning: Optimizer or lr_scheduler given in the config file is different "
+    #             "from that of the checkpoint. Optimizer and scheduler parameters "
+    #             "are not resumed."
+    #         )
+    #     else:
+    #         self.optimizer.load_state_dict(checkpoint["optimizer"])
+    #         self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+    #
+    #     self.logger.info(
+    #         f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
+    #     )
+    #
+    # def _from_pretrained(self, pretrained_path):
+    #     """
+    #     Init model with weights from pretrained pth file.
+    #
+    #     Notice that 'pretrained_path' can be any path on the disk. It is not
+    #     necessary to locate it in the experiment saved dir. The function
+    #     initializes only the model.
+    #
+    #     Args:
+    #         pretrained_path (str): path to the model state dict.
+    #     """
+    #     pretrained_path = str(pretrained_path)
+    #     if hasattr(self, "logger"):  # to support both trainer and inferencer
+    #         self.logger.info(
+    #             f"Loading model weights from: {pretrained_path} ..."
+    #         )
+    #     else:
+    #         print(f"Loading model weights from: {pretrained_path} ...")
+    #     checkpoint = torch.load(pretrained_path, self.device)
+    #
+    #     if checkpoint.get("state_dict") is not None:
+    #         self.model.load_state_dict(checkpoint["state_dict"])
+    #     else:
+    #         self.model.load_state_dict(checkpoint)

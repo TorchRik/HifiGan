@@ -1,28 +1,43 @@
 defaults:
-  - model: baseline
+  - generator: hifi_generator
+  - discriminator: hifi_discriminator
   - writer: wandb
   - metrics: example
-  - datasets: example
-  - dataloader: example
-  - transforms: example
+  - datasets: ljspeech
+  - dataloader: macbook_ljspeech
+  - transforms: empty
   - _self_
-optimizer:
-  _target_: torch.optim.Adam
-  lr: 3e-4
-lr_scheduler:
-  _target_: torch.optim.lr_scheduler.StepLR
-  gamma: 0.9
-  step_size: ${trainer.epoch_len}
-loss_function:
-  _target_: src.loss.ExampleLoss
+audio_to_mel:
+  _target_: src.model.WavToMelSpectrogram
+generator_optimizer:
+  _target_: torch.optim.AdamW
+  lr: 2e-4
+  betas: [0.8, 0.99]
+  weight_decay: 0.01
+discriminator_optimizer:
+  _target_: torch.optim.AdamW
+  lr: 2e-4
+  betas: [0.8, 0.99]
+  weight_decay: 0.01
+generator_lr_scheduler:
+  _target_: torch.optim.lr_scheduler.ExponentialLR
+  gamma: 0.999
+  last_epoch: -1
+discriminator_lr_scheduler:
+  _target_: torch.optim.lr_scheduler.ExponentialLR
+  gamma: 0.999
+  last_epoch: -1
+generator_loss:
+  _target_: src.loss.GeneratorLoss
+discriminator_loss:
+  _target_: src.loss.DiscriminatorLoss
 trainer:
-  log_step: 50
+  log_step: 1
   n_epochs: 100
-  epoch_len: 500
-  device_tensors: ["data_object", "labels"] # which tensors should be on device (ex. GPU)
+  device_tensors: ["audio", "spectrogram"] # which tensors should be on device (ex. GPU)
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
-  override: False # if True, will override the previous run with the same name
+  override: True # if True, will override the previous run with the same name
   monitor: "max test_MulticlassAccuracy" # "off" or "max/min metric_name", i.e. our goal is to maximize/minimize metric
   save_period: 5 # checkpoint each save_period epochs in addition to the best epoch
   early_stop: ${trainer.n_epochs} # epochs for early stopping

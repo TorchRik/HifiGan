@@ -1,0 +1,2 @@
+_target_: src.model.TextToMelSpectrogram
+save_dir: 'fast_speech_cache'

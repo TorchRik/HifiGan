@@ -1,4 +1,7 @@
 import torch
+import torch.nn.functional as F
+
+TENSOR_OBJECTS = ["audio", "spectrogram"]
 
 
 def collate_fn(dataset_items: list[dict]):
@@ -16,10 +19,31 @@ def collate_fn(dataset_items: list[dict]):
 
     result_batch = {}
 
-    # example of collate_fn
-    result_batch["data_object"] = torch.vstack(
-        [elem["data_object"] for elem in dataset_items]
-    )
-    result_batch["labels"] = torch.tensor([elem["labels"] for elem in dataset_items])
+    if not dataset_items:
+        return result_batch
+
+    for item_name in dataset_items[0]:
+        if item_name in TENSOR_OBJECTS:
+            item_lengths = torch.tensor(
+                [elem[item_name].shape[-1] for elem in dataset_items]
+            )
+            max_length = item_lengths.max().item()
+            if item_name == "audio" and max_length % 256:
+                max_length += 256 - max_length % 256
+
+            result_batch[item_name] = torch.stack(
+                [
+                    F.pad(
+                        elem[item_name],
+                        (
+                            0,
+                            max_length - elem[item_name].shape[-1],
+                        ),
+                    )
+                    for elem in dataset_items
+                ]
+            )
+        else:
+            result_batch[item_name] = [elem[item_name] for elem in dataset_items]
 
     return result_batch

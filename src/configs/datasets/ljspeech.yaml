@@ -1,0 +1,9 @@
+train:
+  _target_: src.datasets.LJSpeechDataset
+  dataset_path: 'data/lj_speech_train'
+  rebuild: true
+
+val:
+  _target_: src.datasets.LJSpeechDataset
+  dataset_path: 'data/lj_speech_test'
+  rebuild: true

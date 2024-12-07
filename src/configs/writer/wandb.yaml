@@ -3,6 +3,11 @@ project_name: "pytorch_template"
 entity: null
 run_name: "testing"
 mode: "online"
-loss_names: ["loss"] # which losses to log (useful for multi-loss tasks, s.a. GANs)
+loss_names: [
+  "generator_loss",
+  "discriminator_loss",
+  "generator_grad_norm",
+  "discriminator_grad_norm",
+] # which losses to log (useful for multi-loss tasks, s.a. GANs)
 log_checkpoints: False # set to True if you want to log save_dir with checkpoints to W&B
 id_length: 8 # length of the run_id

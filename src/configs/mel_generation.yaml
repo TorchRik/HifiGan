@@ -1,0 +1,7 @@
+defaults:
+  - generator: wav_to_mel
+  - datasets: ljspeech
+  - dataloader: ljspeech_specs_generation
+  - transforms: empty
+  - _self_
+device: 'auto'

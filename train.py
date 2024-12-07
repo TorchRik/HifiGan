@@ -11,6 +11,8 @@ from src.utils.init_utils import set_random_seed, setup_saving_and_logging
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+torch.autograd.set_detect_anomaly(True)
+
 
 @hydra.main(version_base=None, config_path="src/configs", config_name="baseline")
 def main(config):
@@ -38,28 +40,57 @@ def main(config):
     dataloaders, batch_transforms = get_dataloaders(config, device)
 
     # build model architecture, then print to console
-    model = instantiate(config.model).to(device)
-    logger.info(model)
+    generator = instantiate(config.generator).to(device)
+    discriminator = instantiate(config.discriminator).to(device)
+    audio_to_mel = instantiate(config.audio_to_mel).to(device)
+
+    logger.info(generator)
+    logger.info(discriminator)
 
     # get function handles of loss and metrics
-    loss_function = instantiate(config.loss_function).to(device)
+    generator_loss = instantiate(config.generator_loss).to(device)
+    discriminator_loss = instantiate(config.discriminator_loss).to(device)
     metrics = instantiate(config.metrics)
 
     # build optimizer, learning rate scheduler
-    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = instantiate(config.optimizer, params=trainable_params)
-    lr_scheduler = instantiate(config.lr_scheduler, optimizer=optimizer)
+    generator_trainable_params = filter(
+        lambda p: p.requires_grad, generator.parameters()
+    )
+    generator_optimizer = instantiate(
+        config.generator_optimizer, params=generator_trainable_params
+    )
+
+    discriminator_trainable_params = filter(
+        lambda p: p.requires_grad, discriminator.parameters()
+    )
+    discriminator_optimizer = instantiate(
+        config.discriminator_optimizer, params=discriminator_trainable_params
+    )
+
+    generator_lr_scheduler = instantiate(
+        config.generator_lr_scheduler,
+        optimizer=generator_optimizer,
+    )
+    discriminator_lr_scheduler = instantiate(
+        config.discriminator_lr_scheduler,
+        optimizer=discriminator_optimizer,
+    )
 
     # epoch_len = number of iterations for iteration-based training
     # epoch_len = None or len(dataloader) for epoch-based training
     epoch_len = config.trainer.get("epoch_len")
 
     trainer = Trainer(
-        model=model,
-        criterion=loss_function,
+        generator=generator,
+        discriminator=discriminator,
+        audio_to_mel=audio_to_mel,
+        generator_loss=generator_loss,
+        discriminator_loss=discriminator_loss,
         metrics=metrics,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
+        generator_optimizer=generator_optimizer,
+        discriminator_optimizer=discriminator_optimizer,
+        generator_lr_scheduler=generator_lr_scheduler,
+        discriminator_lr_scheduler=discriminator_lr_scheduler,
         config=config,
         device=device,
         dataloaders=dataloaders,
