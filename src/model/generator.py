@@ -126,7 +126,6 @@ class HiFiGenerator(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 nn.Sequential(
-                    # TODO: Normalization?
                     nn.LeakyReLU(),
                     weight_norm(
                         nn.ConvTranspose1d(

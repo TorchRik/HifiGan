@@ -8,7 +8,7 @@ defaults:
   - transforms: empty
   - _self_
 audio_to_mel:
-  _target_: src.model.WavToMelSpectrogram
+  _target_: src.model.AudioToMelSpectrogram
 generator_optimizer:
   _target_: torch.optim.AdamW
   lr: 2e-4
@@ -34,7 +34,7 @@ discriminator_loss:
 trainer:
   log_step: 1
   n_epochs: 100
-  device_tensors: ["audio", "spectrogram"] # which tensors should be on device (ex. GPU)
+  device_tensors: ["audio"] # which tensors should be on device (ex. GPU)
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: True # if True, will override the previous run with the same name

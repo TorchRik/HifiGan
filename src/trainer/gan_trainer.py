@@ -1,9 +1,9 @@
-from abc import abstractmethod
 from pathlib import Path
 
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from numpy import inf
 from torch.nn.utils import clip_grad_norm_
 from tqdm.auto import tqdm
@@ -12,9 +12,10 @@ from src.datasets.data_utils import inf_loop
 from src.logger.utils import plot_spectrogram
 from src.metrics.tracker import MetricTracker
 from src.utils.io_utils import ROOT_PATH
+from src.utils.mel_spectrogram import MelSpectrogramConfig
 
 
-class BaseTrainer:
+class GanTrainer:
     """
     Base class for all trainers.
     """
@@ -134,7 +135,6 @@ class BaseTrainer:
         self.metrics = metrics
         self.train_metrics = MetricTracker(
             *self.config.writer.loss_names,
-            "grad_norm",
             *[m.name for m in self.metrics["train"]],
             writer=self.writer,
         )
@@ -152,11 +152,10 @@ class BaseTrainer:
 
         if config.trainer.get("resume_from") is not None:
             resume_path = self.checkpoint_dir / config.trainer.resume_from
-            self._resume_checkpoint(resume_path, "generator")
-            self._resume_checkpoint(resume_path, "discriminator")
-        #
-        # if config.trainer.get("from_pretrained") is not None:
-        #     self._from_pretrained(config.trainer.get("from_pretrained"))
+            self._resume_checkpoint(resume_path)
+
+        if config.trainer.get("from_pretrained") is not None:
+            self._from_pretrained(config.trainer.get("from_pretrained"))
 
     def train(self):
         """
@@ -166,22 +165,7 @@ class BaseTrainer:
             self._train_process()
         except KeyboardInterrupt as e:
             self.logger.info("Saving model on keyboard interrupt")
-            self._save_checkpoint(
-                "generator",
-                model=self.generator,
-                optimizer=self.generator_optimizer,
-                lr_scheduler=self.generator_lr_scheduler,
-                epoch=self._last_epoch,
-                save_best=False,
-            )
-            self._save_checkpoint(
-                "discriminator",
-                model=self.discriminator,
-                optimizer=self.discriminator_optimizer,
-                lr_scheduler=self.discriminator_lr_scheduler,
-                epoch=self._last_epoch,
-                save_best=False,
-            )
+            self._save_checkpoint()
             raise e
 
     def _log_audio(self, batch: dict[str, torch.Tensor], mode: str) -> None:
@@ -242,22 +226,7 @@ class BaseTrainer:
             )
 
             if epoch % self.save_period == 0 or best:
-                self._save_checkpoint(
-                    "generator",
-                    model=self.generator,
-                    optimizer=self.generator_optimizer,
-                    lr_scheduler=self.generator_lr_scheduler,
-                    epoch=self._last_epoch,
-                    save_best=False,
-                )
-                self._save_checkpoint(
-                    "discriminator",
-                    model=self.discriminator,
-                    optimizer=self.discriminator_optimizer,
-                    lr_scheduler=self.discriminator_lr_scheduler,
-                    epoch=self._last_epoch,
-                    save_best=False,
-                )
+                self._save_checkpoint()
 
             if stop_process:  # early_stop
                 break
@@ -326,7 +295,6 @@ class BaseTrainer:
                     self.discriminator_lr_scheduler.get_last_lr()[0],
                 )
                 self._log_scalars(self.train_metrics)
-                self._log_batch(batch_idx, batch)
                 # we don't want to reset train metrics at the start of every epoch
                 # because we are interested in recent train metrics
                 last_train_metrics = self.train_metrics.result()
@@ -378,9 +346,6 @@ class BaseTrainer:
                     self._log_audio(batch, "test")
             self.writer.set_step(epoch * self.epoch_len, part)
             self._log_scalars(self.evaluation_metrics)
-            self._log_batch(
-                batch_idx, batch, part
-            )  # log only the last batch during inference
 
         return self.evaluation_metrics.result()
 
@@ -531,22 +496,99 @@ class BaseTrainer:
             total = self.epoch_len
         return base.format(current, total, 100.0 * current / total)
 
-    @abstractmethod
-    def _log_batch(self, batch_idx, batch, mode="train"):
+    def process_batch(self, batch, metrics: MetricTracker):
         """
-        Abstract method. Should be defined in the nested Trainer Class.
+        Run batch through the model, compute metrics, compute loss,
+        and do training step (during training stage).
 
-        Log data from batch. Calls self.writer.add_* to log data
-        to the experiment tracker.
+        The function expects that criterion aggregates all losses
+        (if there are many) into a single one defined in the 'loss' key.
 
         Args:
-            batch_idx (int): index of the current batch.
-            batch (dict): dict-based batch after going through
-                the 'process_batch' function.
-            mode (str): train or inference. Defines which logging
-                rules to apply.
+            batch (dict): dict-based batch containing the data from
+                the dataloader.
+            metrics (MetricTracker): MetricTracker object that computes
+                and aggregates the metrics. The metrics depend on the type of
+                the partition (train or inference).
+        Returns:
+            batch (dict): dict-based batch containing the data from
+                the dataloader (possibly transformed via batch transform),
+                model outputs, and losses.
         """
-        return NotImplementedError()
+        batch = self.move_batch_to_device(batch)
+        batch = self.transform_batch(batch)  # transform batch on device -- faster
+
+        metric_funcs = self.metrics["inference"]
+
+        real_spectrogram = self.audio_to_mel(batch["audio"])
+        fake_audio = self.generator(x=real_spectrogram)
+        fake_spectrogram = self.audio_to_mel(fake_audio)
+
+        real_spectrogram = F.pad(
+            real_spectrogram,
+            (
+                0,
+                fake_spectrogram.shape[-1] - real_spectrogram.shape[-1],
+            ),
+            value=MelSpectrogramConfig.pad_value,
+        )
+        real_audio = F.pad(
+            batch["audio"],
+            (
+                0,
+                fake_audio.shape[-1] - batch["audio"].shape[-1],
+            ),
+            value=0,
+        )
+
+        # discriminator loss:
+        if self.is_train:
+            metric_funcs = self.metrics["train"]
+            self.discriminator_optimizer.zero_grad()
+
+        prediction_for_real = self.discriminator(real_audio)
+        prediction_for_fake = self.discriminator(fake_audio.detach())
+
+        discriminator_loss = self.discriminator_loss(
+            prediction_for_real=prediction_for_real,
+            prediction_for_fake=prediction_for_fake,
+        )
+
+        if self.is_train:
+            discriminator_loss.backward()
+            self._clip_grad_norm()
+            self.discriminator_optimizer.step()
+
+            self.generator_optimizer.zero_grad()
+
+        disc_output_for_real = self.discriminator.forward_with_features_map(real_audio)
+        disc_output_for_fake = self.discriminator.forward_with_features_map(fake_audio)
+
+        generator_loss = self.generator_loss(
+            generated_mel=fake_spectrogram,
+            target_mel=real_spectrogram,
+            disc_output_for_real=disc_output_for_real,
+            disc_output_for_fake=disc_output_for_fake,
+        )
+        if self.is_train:
+            generator_loss.backward()
+            self._clip_grad_norm()
+            self.generator_optimizer.step()
+
+        batch["generator_loss"] = generator_loss.item()
+        batch["discriminator_loss"] = discriminator_loss.item()
+        batch["real_audio"] = real_audio.detach()
+        batch["fake_audio"] = fake_audio.detach()
+        batch["real_spectrogram"] = real_spectrogram.detach()
+        batch["fake_spectrogram"] = fake_spectrogram.detach()
+
+        # update metrics for each loss (in case of multiple losses)
+        metrics.update("generator_loss", generator_loss.item())
+        metrics.update("discriminator_loss", discriminator_loss.item())
+
+        for met in metric_funcs:
+            metrics.update(met.name, met(**batch))
+        return batch
 
     def _log_scalars(self, metric_tracker: MetricTracker):
         """
@@ -560,7 +602,25 @@ class BaseTrainer:
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(f"{metric_name}", metric_tracker.avg(metric_name))
 
-    def _save_checkpoint(
+    def _save_checkpoint(self):
+        self._save_checkpoint_part(
+            "generator",
+            model=self.generator,
+            optimizer=self.generator_optimizer,
+            lr_scheduler=self.generator_lr_scheduler,
+            epoch=self._last_epoch,
+            save_best=False,
+        )
+        self._save_checkpoint_part(
+            "discriminator",
+            model=self.discriminator,
+            optimizer=self.discriminator_optimizer,
+            lr_scheduler=self.discriminator_lr_scheduler,
+            epoch=self._last_epoch,
+            save_best=False,
+        )
+
+    def _save_checkpoint_part(
         self,
         model_type_suffix: str,
         model: nn.Module,
@@ -605,7 +665,11 @@ class BaseTrainer:
                 self.writer.add_checkpoint(best_path, str(self.checkpoint_dir.parent))
             self.logger.info("Saving current best: model_best.pth ...")
 
-    def _resume_checkpoint(self, resume_path: Path, model_type: str):
+    def _resume_checkpoint(self, resume_path: Path) -> None:
+        self._resume_checkpoint_part(resume_path, "generator")
+        self._resume_checkpoint_part(resume_path, "discriminator")
+
+    def _resume_checkpoint_part(self, resume_path: Path, model_type: str):
         """
         Resume from a saved checkpoint (in case of server crash, etc.).
         The function loads state dicts for everything, including model,
@@ -655,27 +719,29 @@ class BaseTrainer:
             f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
         )
 
-    # def _from_pretrained(self, pretrained_path):
-    #     """
-    #     Init model with weights from pretrained pth file.
-    #
-    #     Notice that 'pretrained_path' can be any path on the disk. It is not
-    #     necessary to locate it in the experiment saved dir. The function
-    #     initializes only the model.
-    #
-    #     Args:
-    #         pretrained_path (str): path to the model state dict.
-    #     """
-    #     pretrained_path = str(pretrained_path)
-    #     if hasattr(self, "logger"):  # to support both trainer and inferencer
-    #         self.logger.info(
-    #             f"Loading model weights from: {pretrained_path} ..."
-    #         )
-    #     else:
-    #         print(f"Loading model weights from: {pretrained_path} ...")
-    #     checkpoint = torch.load(pretrained_path, self.device)
-    #
-    #     if checkpoint.get("state_dict") is not None:
-    #         self.model.load_state_dict(checkpoint["state_dict"])
-    #     else:
-    #         self.model.load_state_dict(checkpoint)
+    def _from_pretrained(self, pretrained_path: Path) -> None:
+        self._from_pretrained_part(pretrained_path, "generator")
+        self._from_pretrained_part(pretrained_path, "discriminator")
+
+    def _from_pretrained_part(self, pretrained_path: Path, model_type: str) -> None:
+        """
+        Init model with weights from pretrained pth file.
+
+        Notice that 'pretrained_path' can be any path on the disk. It is not
+        necessary to locate it in the experiment saved dir. The function
+        initializes only the model.
+
+        Args:
+            pretrained_path (str): path to the model state dict.
+        """
+        pretrained_path = (
+            pretrained_path.parent / f"{model_type}-{pretrained_path.name}"
+        )
+        pretrained_path = str(pretrained_path)
+        if hasattr(self, "logger"):  # to support both trainer and inferencer
+            self.logger.info(f"Loading model weights from: {pretrained_path} ...")
+        else:
+            print(f"Loading model weights from: {pretrained_path} ...")
+        checkpoint = torch.load(pretrained_path, self.device)
+
+        getattr(self, model_type).load_state_dict(checkpoint["state_dict"])

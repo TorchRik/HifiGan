@@ -1,29 +1,14 @@
-from dataclasses import dataclass
-
 import librosa
 import torch
 import torchaudio
 from torch import nn
 
-
-@dataclass
-class MelSpectrogramConfig:
-    sr: int = 22050
-    win_length: int = 1024
-    hop_length: int = 256
-    n_fft: int = 1024
-    f_min: int = 0
-    f_max: int = 8000
-    n_mels: int = 80
-    power: float = 1.0
-
-    # value of melspectrograms if we fed a silence into `MelSpectrogram`
-    pad_value: float = -11.5129251
+from src.utils.mel_spectrogram import MelSpectrogramConfig
 
 
-class WavToMelSpectrogram(nn.Module):
+class AudioToMelSpectrogram(nn.Module):
     def __init__(self):
-        super(WavToMelSpectrogram, self).__init__()
+        super(AudioToMelSpectrogram, self).__init__()
         config = MelSpectrogramConfig()
         self.config = config
 
