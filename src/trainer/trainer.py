@@ -36,7 +36,7 @@ class Trainer(BaseTrainer):
         metric_funcs = self.metrics["inference"]
 
         real_spectrogram = self.audio_to_mel(batch["audio"])
-        fake_audio = self.generator(x=batch["spectrogram"])
+        fake_audio = self.generator(x=real_spectrogram)
         fake_spectrogram = self.audio_to_mel(fake_audio)
 
         real_spectrogram = F.pad(

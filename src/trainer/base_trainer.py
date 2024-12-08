@@ -206,11 +206,11 @@ class BaseTrainer:
             ),
         )
         self.writer.add_image(
-            "real_spectrogram",
+            f"real_spectrogram_{mode}",
             plot_spectrogram(batch["real_spectrogram"][0].squeeze(0).cpu().numpy()),
         )
         self.writer.add_image(
-            "generated_spectrogram",
+            f"generated_spectrogram_{mode}",
             plot_spectrogram(batch["fake_spectrogram"][0].squeeze(0).cpu().numpy()),
         )
 
