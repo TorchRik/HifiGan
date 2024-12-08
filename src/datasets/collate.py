@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-AUDIO_MAX_LENGTH = 256 * 100
+AUDIO_MAX_LENGTH = 256 * 200
 
 
 def collate_fn(dataset_items: list[dict]):

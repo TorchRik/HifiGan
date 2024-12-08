@@ -5,7 +5,7 @@ defaults:
   - dataloader: ljspeech_specs_generation
   - transforms: empty
   - _self_
-device: 'auto'
+device: 'cpu'
 audio_to_mel:
   _target_: src.model.AudioToMelSpectrogram
 checkpoint_path: 'saved/generator-checkpoint-epoch70.pth'

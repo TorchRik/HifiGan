@@ -4,7 +4,7 @@ defaults:
   - writer: wandb
   - metrics: example
   - datasets: ljspeech
-  - dataloader: macbook_ljspeech
+  - dataloader: ljspeech
   - transforms: empty
   - _self_
 audio_to_mel:

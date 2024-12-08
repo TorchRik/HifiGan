@@ -53,9 +53,7 @@ class LJSpeechDataset(BaseDataset):
 
         metadata_path = self.dataset_path / "metadata.csv"
         if not metadata_path.is_file():
-            raise ValueError(
-                f"Can not find transcriptions or metadata file {metadata_path}"
-            )
+            return {}
 
         data = pd.read_csv(metadata_path, names=["name", "-", "text"])
 
@@ -72,26 +70,36 @@ class LJSpeechDataset(BaseDataset):
         algorithms tries to create it from metadata.csv.
         """
         transcriptions = self._get_transcriptions()
+        wavs_files = self.wavs_dir.glob("*.wav")
 
-        res = []
-        for file_name, text in transcriptions.items():
-            wav_path = self.wavs_dir / (file_name + ".wav")
-            res.append(
-                {
-                    "name": file_name,
-                    "text": text,
-                    "wav_path": wav_path if wav_path.exists() else None,
-                }
-            )
-        return res
+        if transcriptions:
+            res = []
+            for file_name, text in transcriptions.items():
+                wav_path = self.wavs_dir / (file_name + ".wav")
+                res.append(
+                    {
+                        "name": file_name,
+                        "text": text,
+                        "wav_path": wav_path if wav_path.exists() else None,
+                    }
+                )
+            return res
+        else:
+            res = []
+            for wav_path in wavs_files:
+                res.append(
+                    {"name": wav_path.name.split(".")[0], "wav_path": str(wav_path)}
+                )
+            return res
 
     def __getitem__(self, ind: int) -> dict[str, tp.Any]:
         data_dict = self._index[ind]
 
         instance_data = {
             "name": data_dict["name"],
-            "text": data_dict["text"],
         }
+        if "text" in data_dict:
+            instance_data["text"] = data_dict["text"]
 
         if data_dict["wav_path"] is not None:
             audio, sr = torchaudio.load(data_dict["wav_path"])

@@ -35,9 +35,10 @@ def main(config):
     for dataloader in dataloaders.values():
         for batch in tqdm(dataloader):
             if "audio" in batch.keys():
-                spectrogram = audio_to_mel(batch["audio"])
+                spectrogram = audio_to_mel(batch["audio"].to(device))
             else:
                 spectrogram = text_to_mel(batch["text"])
+            spectrogram = spectrogram.to(device)
 
             generated_audio = mel_to_audio(spectrogram)
             for name, audio in zip(batch["name"], generated_audio):
