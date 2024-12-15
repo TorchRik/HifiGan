@@ -13,21 +13,41 @@ pip install -r requirements.txt
 #### Inference:
 Для запуска модели на новых текстовых данных необходимо запустить два скрипта:
 
-0) В файле configs/datasets/custom_dataset.yaml необходимо указать путь до папке, в которой лежит папка 'transcriptions' с текстовыми файлами, для которых необходимо сгенерировать аудио.
-1) Настроить конфиг для запуска генерации аудио(configs/audio_generation.yaml):
-   Указать путь для сохранения файлов и путь до чекпоинта модели.
-   
-2) Запустить скрипт для генерации аудио:
+
+```bash
+python generate_audio.py datasets.custom_dataset.dataset_path = 'PATH_TO_DATA' \
+  checkpoint_path: 'PATH_TO_CHECKPOINT' \
+  path_to_save: 'PATH_TO_SAVE_DATA'
 ```
-python generate_audio.py
+
+PATH_TO_DATA - Путь до папки с кастомными данными(должна содержать папку
+transcriptions с текстовыми транскрипциями).
+
+PATH_TO_CHECKPOINT - путь до чекпоинта, пример 'saved/generator-checkpoint-epoch70.pth'
+
+PATH_TO_SAVE - путь до сохранения данных, файлы будут лежать в папке PATH_TO_SAVE
+
+
+Для подсчета метрик необходимо запустить:
+
+```bash
+python score_generated.py path_to_score='PATH_TO_SAVED_AUDIO'
 ```
+PATH_TO_SAVED_AUDIO - такой же, как PATH_TO_SAVE.
 
 ##### Training
 Для воспроизведения обучения указать в configs/datasets/ljspeech путь до папки с датасетом, и затем запустить скрипт обучения:
 
 ```
-python train.py
+python train.py datasets.train.dataset_path='PATH_TO_TRAIN_DATASET' \
+datasets.val.dataset_path='PATH_TO_VAL_DATASET'
 ```
+
+Example:
+
+PATH_TO_TRAIN_DATASET = 'data/lj_speech_train'
+
+PATH_TO_VAL_DATASET = 'data/lj_speech_test'
 
 ### Эксперименты:
 
@@ -87,7 +107,7 @@ Spectrogram for generated audio:
 
 В начале обучения спектрограммы сильно отличаются и слабо выравнены по времени и частоте, что в целом логично.
 
-При этом в конце обучения спектрограммы стали похожи, они выравнены и по времени и по частотам, однако спектрограмма реального аудио имеет более четко выделенные области(вероятно как раз сам голос). 
+При этом в конце обучения спектрограммы стали похожи, они выравнены и по времени и по частотам, однако спектрограмма реального аудио имеет более четко выделенные области(вероятно как раз сам голос).
 При этом на этой стадии обучения все еще слышна робастность голоса, что вероятно и соотвествует более размытой спектрограмме.
 
 Сравним теперь аудио представления:
